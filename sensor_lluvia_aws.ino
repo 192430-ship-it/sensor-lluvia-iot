@@ -11,14 +11,18 @@ const char* password = "titoquispe24.";
 const char* mqtt_server = "a299mqez5wy3z1-ats.iot.us-east-2.amazonaws.com";
 const int mqtt_port = 8883;
 const char* mqtt_topic = "sensor/lluvia";
+const char* mqtt_topic_control = "sensor/control";  // NUEVO
 const char* client_id = "esp32-sensor-lluvia";
 
 // ===== PINES DEL SENSOR =====
 #define LED_ESP32 2
-#define PIN_ANALOGICO 34  // AO del sensor
+#define PIN_ANALOGICO 34
 int umbral = 2000;
 
-// ===== CERTIFICADO RAÍZ DE AMAZON =====
+// ===== CONTROL REMOTO =====
+bool sensorActivo = true;  // NUEVO
+
+// ===== CERTIFICADOS (sin cambios) =====
 const char* ca_cert = \
 "-----BEGIN CERTIFICATE-----\n"
 "MIIDQTCCAimgAwIBAgITBmyfz5m/jAo54vB4ikPmljZbyjANBgkqhkiG9w0BAQsF\n"
@@ -41,7 +45,6 @@ const char* ca_cert = \
 "rqXRfboQnoZsG4q5WTP468SQvvG5\n"
 "-----END CERTIFICATE-----\n";
 
-// ===== CERTIFICADO DEL DISPOSITIVO =====
 const char* device_cert = \
 "-----BEGIN CERTIFICATE-----\n"
 "MIIDWTCCAkGgAwIBAgIUa6d3JV02L+A6jqH1tuE0LzPuYrkwDQYJKoZIhvcNAQEL\n"
@@ -64,7 +67,6 @@ const char* device_cert = \
 "wKUjbEoTfoUdbE/ag6gwyYwhKjtVmfrjmEeAwl5TF7Y17wmQuvJMeny75+3i\n"
 "-----END CERTIFICATE-----\n";
 
-// ===== LLAVE PRIVADA =====
 const char* private_key = \
 "-----BEGIN RSA PRIVATE KEY-----\n"
 "MIIEpAIBAAKCAQEAsDt82wnaGdawHLb61j0CxcmazOIMzLLmWwC54LWh6/9crvgG\n"
@@ -99,7 +101,31 @@ WiFiClientSecure espClient;
 PubSubClient client(espClient);
 
 unsigned long lastMsg = 0;
-const long interval = 10000; // Enviar cada 10 segundos
+const long interval = 10000;
+
+// ===== CALLBACK — recibe mensajes MQTT =====
+void callback(char* topic, byte* payload, unsigned int length) {
+  String msg = "";
+  for (int i = 0; i < length; i++) {
+    msg += (char)payload[i];
+  }
+  Serial.print("Mensaje recibido [");
+  Serial.print(topic);
+  Serial.print("]: ");
+  Serial.println(msg);
+
+  if (String(topic) == mqtt_topic_control) {
+    if (msg.indexOf("APAGAR") >= 0) {
+      sensorActivo = false;
+      digitalWrite(LED_ESP32, LOW);
+      Serial.println(">>> Sensor APAGADO desde dashboard");
+    }
+    if (msg.indexOf("ENCENDER") >= 0) {
+      sensorActivo = true;
+      Serial.println(">>> Sensor ENCENDIDO desde dashboard");
+    }
+  }
+}
 
 void conectarWiFi() {
   Serial.print("Conectando a WiFi: ");
@@ -119,6 +145,9 @@ void reconectarMQTT() {
     Serial.print("Conectando a AWS IoT...");
     if (client.connect(client_id)) {
       Serial.println("Conectado!");
+      // Suscribirse al topic de control
+      client.subscribe(mqtt_topic_control);
+      Serial.println("Suscrito a sensor/control");
     } else {
       Serial.print("Error: ");
       Serial.println(client.state());
@@ -138,6 +167,7 @@ void setup() {
   espClient.setPrivateKey(private_key);
 
   client.setServer(mqtt_server, mqtt_port);
+  client.setCallback(callback);  // NUEVO
   client.setBufferSize(512);
 }
 
@@ -147,33 +177,39 @@ void loop() {
   }
   client.loop();
 
-  unsigned long now = millis();
-  if (now - lastMsg > interval) {
-    lastMsg = now;
+  // Solo envía datos si el sensor está activo
+  if (sensorActivo) {
+    unsigned long now = millis();
+    if (now - lastMsg > interval) {
+      lastMsg = now;
 
-    int valorAnalogico = analogRead(PIN_ANALOGICO);
-    String estado = (valorAnalogico < umbral) ? "LLUVIA" : "SECO";
+      int valorAnalogico = analogRead(PIN_ANALOGICO);
+      String estado = (valorAnalogico < umbral) ? "LLUVIA" : "SECO";
 
-    // LED indicador
-    digitalWrite(LED_ESP32, (valorAnalogico < umbral) ? HIGH : LOW);
+      digitalWrite(LED_ESP32, (valorAnalogico < umbral) ? HIGH : LOW);
 
-    // Crear JSON
-    StaticJsonDocument<200> doc;
-    doc["dispositivo"] = "esp32-sensor";
-    doc["estado"] = estado;
-    doc["valor_analogico"] = valorAnalogico;
-    doc["umbral"] = umbral;
+      StaticJsonDocument<200> doc;
+      doc["dispositivo"] = "esp32-sensor";
+      doc["estado"] = estado;
+      doc["valor_analogico"] = valorAnalogico;
+      doc["umbral"] = umbral;
 
-    char buffer[256];
-    serializeJson(doc, buffer);
+      char buffer[256];
+      serializeJson(doc, buffer);
 
-    Serial.print("Enviando: ");
-    Serial.println(buffer);
+      Serial.print("Enviando: ");
+      Serial.println(buffer);
 
-    if (client.publish(mqtt_topic, buffer)) {
-      Serial.println("Dato enviado a AWS!");
-    } else {
-      Serial.println("Error al enviar");
+      if (client.publish(mqtt_topic, buffer)) {
+        Serial.println("Dato enviado a AWS!");
+      } else {
+        Serial.println("Error al enviar");
+      }
     }
+  } else {
+    // Sensor apagado — solo mantiene conexión MQTT
+    Serial.println("Sensor pausado...");
+    delay(3000);
   }
 }
+
